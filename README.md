@@ -118,3 +118,38 @@ Helper script to install solana in a container. Building the x86_64 build of `au
 `./scripts/update-keys.sh`
 
 Helper script to update Program IDs and deploy keys to the local dev configured ones. Uses `../dev-tools/compose/.env` to source the private keys for each program. This will dirty the git status, so be sure to run `./scripts/update-keys.sh restore` when you're done (`./scripts/build.sh` calls this internally)
+
+# Syncing Changes
+
+## Setup
+Add the audius-protocol repo as a remote in your extracted repos:
+```bash
+git remote add audius-protocol ../audius-protocol
+git fetch audius-protocol
+```
+
+## Syncing with `audius-protocol`
+
+1. **Find solana-programs-related commits in the audius-protocol repo:**
+```bash
+git log audius-protocol/main --oneline -- "solana-programs/*"
+```
+
+2. **Cherry-pick specific commits:**
+```bash
+git cherry-pick <commit-hash>
+```
+
+3. **Test your changes:**
+```bash
+# Adjust based on your actual build/test commands
+cargo build
+cargo test
+```
+
+4. **Handle conflicts if they occur:**
+```bash
+# Fix conflicts manually, then:
+git add .
+git cherry-pick --continue
+```
