@@ -153,3 +153,9 @@ cargo test
 git add .
 git cherry-pick --continue
 ```
+
+### Note: rust-analyzer
+
+Due to the pinned Rust versions used for these programs, the rust-analyzer version used must be pinned to v0.3.1386. For VS Code's extension, drop down from "Uninstall" and select "Install specific version".
+
+See: https://github.com/rust-lang/rust-analyzer/issues/17910
