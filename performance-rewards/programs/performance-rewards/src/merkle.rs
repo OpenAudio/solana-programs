@@ -80,6 +80,10 @@ mod tests {
             hex::encode(reward),
             "810ce6736b0210076f96a10e7f843acfcf0738d5c897d9257aca392826ccc0bd"
         );
+        assert_eq!(
+            hex::encode(hash_pair(&eligible, &reward)),
+            "805afe76c9354161245bfcf47f809ba6da198ac05237de516a2e6547d74f2be6"
+        );
     }
 
     #[test]
@@ -90,5 +94,106 @@ mod tests {
         assert!(verify_proof(a, &[b], &root));
         assert!(verify_proof(b, &[a], &root));
         assert!(!verify_proof(keccak::hash(b"c").to_bytes(), &[b], &root));
+    }
+
+    #[test]
+    fn cross_language_odd_leaf_root_and_proofs() {
+        let leaves = [
+            keccak::hash(b"a").to_bytes(),
+            keccak::hash(b"b").to_bytes(),
+            keccak::hash(b"c").to_bytes(),
+        ];
+        assert_eq!(
+            hex::encode(leaves[0]),
+            "3ac225168df54212a25c1c01fd35bebfea408fdac2e31ddd6f80a4bbf9a5f1cb"
+        );
+        assert_eq!(
+            hex::encode(leaves[1]),
+            "b5553de315e0edf504d9150af82dafa5c4667fa618ed0a6f19c69b41166c5510"
+        );
+        assert_eq!(
+            hex::encode(leaves[2]),
+            "0b42b6393c1f53060fe3ddbfcd7aadcca894465a5a438f69c87d790b2299b9b2"
+        );
+
+        let left_parent = hash_pair(&leaves[0], &leaves[1]);
+        assert_eq!(
+            hex::encode(left_parent),
+            "805b21d846b189efaeb0377d6bb0d201b3872a363e607c25088f025b0c6ae1f8"
+        );
+        let root = hash_pair(&left_parent, &leaves[2]);
+        assert_eq!(
+            hex::encode(root),
+            "5842148bc6ebeb52af882a317c765fccd3ae80589b21a9b8cbf21abb630e46a7"
+        );
+        assert!(verify_proof(leaves[0], &[leaves[1], leaves[2]], &root));
+        assert!(verify_proof(leaves[1], &[leaves[0], leaves[2]], &root));
+        assert!(verify_proof(leaves[2], &[left_parent], &root));
+        assert!(!verify_proof(leaves[2], &[], &root));
+        assert!(!verify_proof(leaves[2], &[left_parent, leaves[0]], &root));
+    }
+
+    #[test]
+    fn property_sweep_rejects_malformed_proofs() {
+        for count in 1..=64usize {
+            let leaves: Vec<[u8; 32]> = (0..count)
+                .map(|index| {
+                    keccak::hashv(&[
+                        b"OAP_MERKLE_PROPERTY",
+                        &(count as u64).to_be_bytes(),
+                        &(index as u64).to_be_bytes(),
+                    ])
+                    .to_bytes()
+                })
+                .collect();
+            for index in 0..count {
+                let (root, proof) = root_and_proof(&leaves, index);
+                assert!(verify_proof(leaves[index], &proof, &root));
+
+                let mut bad_leaf = leaves[index];
+                bad_leaf[index % 32] ^= 1;
+                assert!(!verify_proof(bad_leaf, &proof, &root));
+
+                let mut bad_root = root;
+                bad_root[(index * 7) % 32] ^= 1;
+                assert!(!verify_proof(leaves[index], &proof, &bad_root));
+
+                if !proof.is_empty() {
+                    let mut mutated = proof.clone();
+                    mutated[0][0] ^= 1;
+                    assert!(!verify_proof(leaves[index], &mutated, &root));
+                    assert!(!verify_proof(
+                        leaves[index],
+                        &proof[..proof.len() - 1],
+                        &root
+                    ));
+                }
+                let mut appended = proof.clone();
+                appended.push([0xee; 32]);
+                assert!(!verify_proof(leaves[index], &appended, &root));
+            }
+        }
+    }
+
+    fn root_and_proof(leaves: &[[u8; 32]], mut index: usize) -> ([u8; 32], Vec<[u8; 32]>) {
+        let mut level = leaves.to_vec();
+        let mut proof = Vec::new();
+        while level.len() > 1 {
+            let sibling = index ^ 1;
+            if sibling < level.len() {
+                proof.push(level[sibling]);
+            }
+            let mut next = Vec::with_capacity((level.len() + 1) / 2);
+            for pair in level.chunks(2) {
+                next.push(if pair.len() == 1 {
+                    pair[0]
+                } else {
+                    hash_pair(&pair[0], &pair[1])
+                });
+            }
+            index /= 2;
+            level = next;
+        }
+        (level[0], proof)
     }
 }
