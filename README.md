@@ -24,7 +24,7 @@ sh -c "$(curl -sSfL https://release.solana.com/v1.18.18/install)"
 
 [Install Anchor](https://www.anchor-lang.com/docs/installation)
 
-Used for the Payment Router and Staking Bridge. Build script will ensure the matching version of Anchor is used (0.28.0 at time of writing) via `avm use`.
+Used for the Payment Router, Staking Bridge, and Performance Rewards programs. Build script will ensure the matching version of Anchor is used (0.28.0 at time of writing) via `avm use`.
 
 ```
 cargo install --git https://github.com/coral-xyz/anchor avm --locked --force
@@ -33,6 +33,10 @@ cargo install --git https://github.com/coral-xyz/anchor avm --locked --force
 ## Development
 
 New programs should use [Anchor](https://www.anchor-lang.com/).
+
+The [Performance Rewards](./performance-rewards/README.md) program finalizes
+weighted validator attestations of deterministic, versioned Core snapshots and
+distributes the fixed weekly node-operator reward pool.
 
 Copy the IDL and types to the `@audius/spl` package for easier, standardized consumption, and create clients in `@audius/sdk` with sane defaults.
 

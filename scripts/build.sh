@@ -41,12 +41,20 @@ echo
 
 echo -e ">>> ${LIGHT_GREEN}Changing Anchor version to 0.28.0...${NO_COLOR}"
 echo
-echo avm use 0.28.0
+avm use 0.28.0
 echo
 
 echo -e ">>> ${LIGHT_GREEN}Building payment router...${NO_COLOR}"
 echo
 cd payment-router/
+anchor keys sync
+anchor build
+cd -
+echo
+
+echo -e ">>> ${LIGHT_GREEN}Building performance rewards...${NO_COLOR}"
+echo
+cd performance-rewards/
 anchor keys sync
 anchor build
 cd -

@@ -60,6 +60,8 @@ if [[ "$1" = "restore" ]]; then
     restore_backup reward-manager/program/src/lib.rs
     restore_backup payment-router/programs/payment-router/src/lib.rs
     restore_backup payment-router/Anchor.toml
+    restore_backup performance-rewards/programs/performance-rewards/src/lib.rs
+    restore_backup performance-rewards/Anchor.toml
 else
     echo "Replacing program keys..."
     mkdir -p ${CARGO_TARGET_DIR:-target}/deploy
@@ -81,4 +83,10 @@ else
         payment-router/programs/payment-router/src/lib.rs \
         payment-router/Anchor.toml \
         ${CARGO_TARGET_DIR:-target}/deploy/payment_router-keypair.json
+
+    generate_key ${CARGO_TARGET_DIR:-target}/deploy/performance_rewards-keypair.json "$SOLANA_PERFORMANCE_REWARDS_SECRET_KEY"
+    replace_address \
+        performance-rewards/programs/performance-rewards/src/lib.rs \
+        performance-rewards/Anchor.toml \
+        ${CARGO_TARGET_DIR:-target}/deploy/performance_rewards-keypair.json
 fi
