@@ -493,6 +493,26 @@ impl Processor {
         let mut verified_messages = VerifiedMessages::unpack(&verified_messages_info.data.borrow())?;
         assert_initialized(&verified_messages)?;
 
+        // Bind the verified_messages account to this reward manager. Without
+        // these two checks a caller can pair a victim's verified_messages
+        // account (which passes the owner check above because the program owns
+        // every such account) with their own attacker-controlled RewardManager
+        // and settle it, draining the victim account's rent. `submit_attestations`
+        // already performs both of these checks; `evaluate_attestations` must too.
+        assert_account_key(reward_manager_info, &verified_messages.reward_manager)?;
+
+        let verified_messages_account_seed = [
+            VERIFY_TRANSFER_SEED_PREFIX.as_bytes().as_ref(),
+            transfer_data.id.as_ref(),
+        ]
+        .concat();
+        let (_, derived_verified_messages_account, _) = find_derived_pair(
+            program_id,
+            reward_manager_info.key,
+            verified_messages_account_seed.as_ref(),
+        );
+        assert_account_key(verified_messages_info, &derived_verified_messages_account)?;
+
         // Ensure the transfer account doesn't yet exist
         let transfer_acct_is_empty = transfer_account_info.try_data_is_empty().unwrap_or(true);
         if !transfer_acct_is_empty {

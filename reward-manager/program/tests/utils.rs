@@ -110,6 +110,89 @@ pub fn new_secp256k1_instruction_2_0(
     }
 }
 
+/// Builds a secp256k1 instruction that genuinely signs `message_arr` but then
+/// appends `trailing` UNSIGNED bytes after the signed region, while leaving
+/// `message_data_size` pointing only at `message_arr`.
+///
+/// The native secp256k1 precompile verifies the signature over
+/// `data[message_data_offset .. message_data_offset + message_data_size]`, i.e.
+/// only `message_arr`, so it still passes. A program that reads `data[97..]`
+/// all the way to the end of the instruction (as the reward manager's message
+/// extractors do) would treat `message_arr || trailing` as the signed message.
+/// This lets a genuine historical signature be replayed with an arbitrary
+/// suffix appended. `validate_secp_offsets` must reject it by requiring the
+/// instruction data to end exactly at the end of the signed message.
+pub fn new_secp256k1_instruction_with_trailing_bytes(
+    priv_key: &libsecp256k1::SecretKey,
+    message_arr: &[u8],
+    trailing: &[u8],
+    instruction_index: u8,
+) -> Instruction {
+    let secp_pubkey = libsecp256k1::PublicKey::from_secret_key(priv_key);
+    let eth_pubkey = construct_eth_pubkey(&secp_pubkey);
+    let mut hasher = sha3::Keccak256::new();
+    hasher.update(&message_arr);
+    let message_hash = hasher.finalize();
+    let mut message_hash_arr = [0u8; 32];
+    message_hash_arr.copy_from_slice(&message_hash.as_slice());
+    let message = libsecp256k1::Message::parse(&message_hash_arr);
+    let (signature, recovery_id) = libsecp256k1::sign(&message, priv_key);
+    let signature_arr = signature.serialize();
+    assert_eq!(signature_arr.len(), SIGNATURE_SERIALIZED_SIZE);
+
+    let mut instruction_data = vec![];
+    instruction_data.resize(
+        DATA_START
+            .saturating_add(eth_pubkey.len())
+            .saturating_add(signature_arr.len())
+            .saturating_add(message_arr.len())
+            .saturating_add(trailing.len())
+            .saturating_add(1),
+        0,
+    );
+    let eth_address_offset = DATA_START;
+    instruction_data[eth_address_offset..eth_address_offset.saturating_add(eth_pubkey.len())]
+        .copy_from_slice(&eth_pubkey);
+
+    let signature_offset = DATA_START.saturating_add(eth_pubkey.len());
+    instruction_data[signature_offset..signature_offset.saturating_add(signature_arr.len())]
+        .copy_from_slice(&signature_arr);
+
+    instruction_data[signature_offset.saturating_add(signature_arr.len())] =
+        recovery_id.serialize();
+
+    let message_data_offset = signature_offset
+        .saturating_add(signature_arr.len())
+        .saturating_add(1);
+    // Genuinely-signed message ...
+    instruction_data[message_data_offset..message_data_offset.saturating_add(message_arr.len())]
+        .copy_from_slice(message_arr);
+    // ... followed by unsigned trailing bytes.
+    instruction_data[message_data_offset.saturating_add(message_arr.len())..]
+        .copy_from_slice(trailing);
+
+    let num_signatures = 1;
+    instruction_data[0] = num_signatures;
+    let offsets = SecpSignatureOffsets {
+        signature_offset: signature_offset as u16,
+        signature_instruction_index: instruction_index,
+        eth_address_offset: eth_address_offset as u16,
+        eth_address_instruction_index: instruction_index,
+        message_data_offset: message_data_offset as u16,
+        // Size deliberately covers ONLY the signed message, not `trailing`.
+        message_data_size: message_arr.len() as u16,
+        message_instruction_index: instruction_index,
+    };
+    let writer = std::io::Cursor::new(&mut instruction_data[1..DATA_START]);
+    bincode::serialize_into(writer, &offsets).unwrap();
+
+    Instruction {
+        program_id: solana_sdk::secp256k1_program::id(),
+        accounts: vec![],
+        data: instruction_data,
+    }
+}
+
 pub async fn create_sender(
     context: &mut ProgramTestContext,
     reward_manager: &Pubkey,
@@ -337,6 +420,23 @@ pub fn assert_custom_error(
             assert_eq!(v, audius_error as u32);
         }
         _ => panic!("Expected error"),
+    }
+}
+
+/// Assert that `res` failed with a specific builtin `InstructionError` at
+/// `instruction_index` (for non-`Custom` errors such as `InvalidArgument`,
+/// which `assert_account_key` returns on a key mismatch).
+pub fn assert_instruction_error(
+    res: Result<(), TransportError>,
+    instruction_index: u8,
+    expected: InstructionError,
+) {
+    match res {
+        Err(TransportError::TransactionError(TransactionError::InstructionError(idx, err))) => {
+            assert_eq!(idx, instruction_index);
+            assert_eq!(err, expected);
+        }
+        _ => panic!("Expected instruction error"),
     }
 }
 

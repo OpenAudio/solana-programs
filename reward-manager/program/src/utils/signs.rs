@@ -171,8 +171,37 @@ pub fn validate_secp_offsets(
     Ok(())
 }
 
-// meta (12) + address (20) + signature (65) = 97
-const MESSAGE_DATA_OFFSET: usize = 97;
+/// Extracts the message that the secp256k1 precompile actually verified,
+/// namely `[message_data_offset .. message_data_offset + message_data_size]`.
+///
+/// SECURITY: the native secp256k1 precompile only checks the signature over the
+/// `message_data_size` bytes starting at `message_data_offset`. Reading to the
+/// end of the instruction would treat any bytes an attacker appended after the
+/// signed region as part of the signed message, letting a genuine historical
+/// attestation be replayed for an arbitrarily extended message. Bounding the
+/// slice by the verified `message_data_size` closes that replay.
+/// `validate_secp_offsets` has already asserted `message_data_offset == 97`.
+fn extract_verified_message(
+    secp_instruction_data: &[u8],
+) -> Result<Vec<u8>, ProgramError> {
+    let start = 1;
+    let end = start + SIGNATURE_OFFSETS_SERIALIZED_SIZE;
+    if secp_instruction_data.len() < end {
+        return Err(AudiusProgramError::SignatureVerificationFailed.into());
+    }
+    let offsets = SecpSignatureOffsets::try_from_slice(&secp_instruction_data[start..end])
+        .map_err(|_| AudiusProgramError::SignatureVerificationFailed)?;
+
+    let message_start = offsets.message_data_offset as usize;
+    let message_end = message_start
+        .checked_add(offsets.message_data_size as usize)
+        .ok_or(AudiusProgramError::SignatureVerificationFailed)?;
+    if message_end > secp_instruction_data.len() {
+        return Err(AudiusProgramError::SignatureVerificationFailed.into());
+    }
+
+    Ok(secp_instruction_data[message_start..message_end].to_vec())
+}
 
 /// Assert that the message contained in `secp_instruction_data`
 /// matches `expected_message`.
@@ -180,7 +209,7 @@ pub fn check_message_from_secp_instruction(
     secp_instruction_data: Vec<u8>,
     expected_message: &[u8],
 ) -> Result<(), ProgramError> {
-    let message = secp_instruction_data[MESSAGE_DATA_OFFSET..].to_vec();
+    let message = extract_verified_message(&secp_instruction_data)?;
     if message != *expected_message {
         Err(AudiusProgramError::SignatureVerificationFailed.into())
     } else {
@@ -192,7 +221,7 @@ pub fn check_message_from_secp_instruction(
 pub fn get_vote_message_from_secp_instruction(
     secp_instruction_data: Vec<u8>,
 ) -> Result<VoteMessage, ProgramError> {
-    let mut message = secp_instruction_data[MESSAGE_DATA_OFFSET..].to_vec();
+    let mut message = extract_verified_message(&secp_instruction_data)?;
 
     while message.len() < 128 {
         message.push(0);
