@@ -1,0 +1,13 @@
+[features]
+seeds = false
+skip-lint = false
+
+[programs.localnet]
+performance_rewards = "GuzBj2tXuqJWu5KqinF2bba5E9Leqq6udebrGhLKboGV"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "localnet"
+wallet = "id.json"

@@ -1,0 +1,31 @@
+[package]
+name = "performance-rewards"
+version = "0.1.0"
+description = "Weighted, attested Open Audio Validator Node performance rewards"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "performance_rewards"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+test-sbf = []
+
+[dependencies]
+anchor-lang = "0.28.0"
+anchor-spl = "0.28.0"
+bs58 = "0.5.1"
+solana-security-txt = "1.1.1"
+
+[dev-dependencies]
+hex = "0.4"
+libsecp256k1 = "0.6.0"
+solana-program-test = "=1.16.7"
+solana-sdk = "=1.16.7"
+spl-token = { version = "3.5.0", features = ["no-entrypoint"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
