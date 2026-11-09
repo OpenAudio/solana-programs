@@ -67,6 +67,10 @@ pub enum AudiusProgramError {
     /// Invalid recipient
     #[error("Invalid Recipient")]
     InvalidRecipient,
+
+    /// Legacy signatures are permanently disabled by the V2 migration.
+    #[error("Legacy reward attestations are disabled")]
+    LegacyAttestationsDisabled,
 }
 impl From<AudiusProgramError> for ProgramError {
     fn from(e: AudiusProgramError) -> Self {

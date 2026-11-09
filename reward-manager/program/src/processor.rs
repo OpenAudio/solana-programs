@@ -12,7 +12,10 @@ use crate::{
     },
     utils::*,
 };
-use borsh::BorshDeserialize;
+use borsh::{BorshDeserialize, BorshSerialize};
+use crate::attestation_v2::{self, Claim, Policy};
+use crate::instruction::{SetAttestationPolicyArgs, EvaluateAttestationsV2Args};
+use solana_program::clock::Clock;
 use solana_program::{
     account_info::next_account_info,
     account_info::AccountInfo,
@@ -40,6 +43,63 @@ pub const TRANSFER_ACC_SPACE: usize = 1;
 pub struct Processor;
 
 impl Processor {
+    /// Only the current manager may configure or revoke V2 attestations.
+    fn process_set_attestation_policy(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        args: SetAttestationPolicyArgs,
+    ) -> ProgramResult {
+        let iter = &mut accounts.iter();
+        let manager_state = next_account_info(iter)?;
+        let manager = next_account_info(iter)?;
+        let policy_info = next_account_info(iter)?;
+        let payer = next_account_info(iter)?;
+        let system = next_account_info(iter)?;
+        let rent_info = next_account_info(iter)?;
+        assert_owned_by(manager_state, program_id)?;
+        let state = RewardManager::unpack(&manager_state.try_borrow_data()?)?;
+        assert_account_key(manager, &state.manager)?;
+        if !manager.is_signer || !payer.is_signer {
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+        if args.chain_domain == [0; 32] || args.oracle == [0; 20] {
+            return Err(ProgramError::InvalidArgument);
+        }
+        assert_account_key(system, &solana_program::system_program::id())?;
+        let (key, bump) = attestation_v2::policy_address(program_id, manager_state.key);
+        assert_account_key(policy_info, &key)?;
+
+        let epoch = if policy_info.owner == program_id {
+            let current = Policy::try_from_slice(&policy_info.try_borrow_data()?)?;
+            if current.version != 2 || current.reward_manager != *manager_state.key
+                || current.chain_domain != args.chain_domain || current.epoch == 0 {
+                return Err(ProgramError::InvalidAccountData);
+            }
+            current.epoch.checked_add(1).ok_or(AudiusProgramError::MathOverflow)?
+        } else {
+            assert_owned_by(policy_info, &solana_program::system_program::id())?;
+            if !policy_info.data_is_empty() {
+                return Err(ProgramError::InvalidAccountData);
+            }
+            let rent = Rent::from_account_info(rent_info)?;
+            let required = rent.minimum_balance(Policy::LEN).saturating_sub(policy_info.lamports());
+            if required > 0 {
+                invoke(&system_instruction::transfer(payer.key, policy_info.key, required),
+                    &[payer.clone(), policy_info.clone(), system.clone()])?;
+            }
+            let seeds: &[&[u8]] = &[attestation_v2::POLICY_SEED, manager_state.key.as_ref(), &[bump]];
+            invoke_signed(&system_instruction::allocate(policy_info.key, Policy::LEN as u64),
+                &[policy_info.clone(), system.clone()], &[seeds])?;
+            invoke_signed(&system_instruction::assign(policy_info.key, program_id),
+                &[policy_info.clone(), system.clone()], &[seeds])?;
+            1
+        };
+        let policy = Policy { version: 2, reward_manager: *manager_state.key,
+            chain_domain: args.chain_domain, oracle: args.oracle, epoch, enabled: args.enabled };
+        policy.serialize(&mut &mut policy_info.try_borrow_mut_data()?[..])?;
+        Ok(())
+    }
+
     /// Transfer all the SOL from source to receiver
     pub fn transfer_all(source: &AccountInfo, receiver: &AccountInfo) -> Result<(), ProgramError> {
         let mut from = source.try_borrow_mut_lamports()?;
@@ -481,6 +541,8 @@ impl Processor {
         payer_info: &AccountInfo<'a>,
         rent_info: &AccountInfo<'a>,
         transfer_data: EvaluateAttestationsArgs,
+        policy_info: &AccountInfo<'a>,
+        v2: &EvaluateAttestationsV2Args,
     ) -> ProgramResult {
         let rent = &Rent::from_account_info(rent_info)?;
 
@@ -528,27 +590,30 @@ impl Processor {
         let bot_oracle = SenderAccount::unpack(&bot_oracle_info.data.borrow())?;
         assert_account_key(reward_manager_info, &bot_oracle.reward_manager)?;
 
-        // Valid senders message
-        let valid_message = [
-            transfer_data.eth_recipient.as_ref(),
-            b"_",
-            transfer_data.amount.to_le_bytes().as_ref(),
-            b"_",
-            transfer_data.id.as_ref(),
-            b"_",
-            bot_oracle.eth_address.as_ref(),
-        ]
-        .concat();
-
-        // Valid bot oracle message
-        let valid_bot_oracle_message = [
-            transfer_data.eth_recipient.as_ref(),
-            b"_",
-            transfer_data.amount.to_le_bytes().as_ref(),
-            b"_",
-            transfer_data.id.as_ref(),
-        ]
-        .concat();
+        assert_owned_by(policy_info, program_id)?;
+        let (policy_key, _) = attestation_v2::policy_address(program_id, reward_manager_info.key);
+        assert_account_key(policy_info, &policy_key)?;
+        let policy = Policy::try_from_slice(&policy_info.try_borrow_data()?)?;
+        policy.check(reward_manager_info.key, &bot_oracle.eth_address,
+            v2.epoch, v2.valid_until_slot, Clock::get()?.slot)?;
+        assert_owned_by(reward_token_source_info, &spl_token::id())?;
+        assert_account_key(reward_token_source_info, &reward_manager.token_account)?;
+        let source = spl_token::state::Account::unpack(&reward_token_source_info.try_borrow_data()?)?;
+        let claim = Claim {
+            chain_domain: policy.chain_domain,
+            program: *program_id,
+            reward_manager: *reward_manager_info.key,
+            mint: source.mint,
+            reward_address: v2.reward_address,
+            recipient: transfer_data.eth_recipient,
+            oracle: bot_oracle.eth_address,
+            amount: transfer_data.amount,
+            epoch: v2.epoch,
+            valid_until_slot: v2.valid_until_slot,
+            disbursement_id: transfer_data.id.clone(),
+        };
+        let valid_message = claim.message(attestation_v2::VALIDATOR)?;
+        let valid_bot_oracle_message = claim.message(attestation_v2::ORACLE)?;
 
         // Assert messages are in the expected format
         assert_valid_attestations(
@@ -793,6 +858,9 @@ impl Processor {
                 )
             }
             Instructions::SubmitAttestations(SubmitAttestationsArgs { id }) => {
+                if id.is_empty() || id.len() > 30 {
+                    return Err(ProgramError::InvalidArgument);
+                }
                 msg!("Instruction: SubmitAttestations");
 
                 let verified_messages = next_account_info(account_info_iter)?;
@@ -816,42 +884,33 @@ impl Processor {
                     SubmitAttestationsArgs { id },
                 )
             }
-            Instructions::EvaluateAttestations(EvaluateAttestationsArgs {
-                amount,
-                id,
-                eth_recipient,
-            }) => {
-                msg!("Instruction: Transfer");
-
-                let verified_messages_info = next_account_info(account_info_iter)?;
-                let reward_manager_info = next_account_info(account_info_iter)?;
-                let reward_manager_authority_info = next_account_info(account_info_iter)?;
-                let reward_token_source_info = next_account_info(account_info_iter)?;
-                let reward_token_recipient_info = next_account_info(account_info_iter)?;
-                let transfer_account_info = next_account_info(account_info_iter)?;
-                let bot_oracle_info = next_account_info(account_info_iter)?;
-                let payer_info = next_account_info(account_info_iter)?;
-                let rent_info = next_account_info(account_info_iter)?;
-                let _token_program_id = next_account_info(account_info_iter)?;
-                let _system_program_id = next_account_info(account_info_iter)?;
-
-                Self::process_evaluate_attestations(
-                    program_id,
-                    verified_messages_info,
-                    reward_manager_info,
-                    reward_manager_authority_info,
-                    reward_token_source_info,
-                    reward_token_recipient_info,
-                    transfer_account_info,
-                    bot_oracle_info,
-                    payer_info,
-                    rent_info,
-                    EvaluateAttestationsArgs {
-                        amount,
-                        id,
-                        eth_recipient,
-                    },
-                )
+            Instructions::EvaluateAttestations(_) => {
+                Err(AudiusProgramError::LegacyAttestationsDisabled.into())
+            }
+            Instructions::SetAttestationPolicy(args) => {
+                Self::process_set_attestation_policy(program_id, accounts, args)
+            }
+            Instructions::EvaluateAttestationsV2(args) => {
+                if args.transfer.id.is_empty() || args.transfer.id.len() > 30 {
+                    return Err(ProgramError::InvalidArgument);
+                }
+                let verified = next_account_info(account_info_iter)?;
+                let manager = next_account_info(account_info_iter)?;
+                let authority = next_account_info(account_info_iter)?;
+                let source = next_account_info(account_info_iter)?;
+                let recipient = next_account_info(account_info_iter)?;
+                let transfer = next_account_info(account_info_iter)?;
+                let oracle = next_account_info(account_info_iter)?;
+                let payer = next_account_info(account_info_iter)?;
+                let rent = next_account_info(account_info_iter)?;
+                let token_program = next_account_info(account_info_iter)?;
+                let system = next_account_info(account_info_iter)?;
+                let policy = next_account_info(account_info_iter)?;
+                assert_account_key(token_program, &spl_token::id())?;
+                assert_account_key(system, &solana_program::system_program::id())?;
+                Self::process_evaluate_attestations(program_id, verified, manager, authority,
+                    source, recipient, transfer, oracle, payer, rent,
+                    args.transfer.clone(), policy, &args)
             }
         }
     }

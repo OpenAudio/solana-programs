@@ -55,6 +55,30 @@ pub struct EvaluateAttestationsArgs {
     pub eth_recipient: EthereumAddress,
 }
 
+/// Manager-authorized V2 oracle policy. Every update advances its epoch.
+#[derive(BorshSerialize, BorshDeserialize, PartialEq, Debug, Clone)]
+pub struct SetAttestationPolicyArgs {
+    /// Immutable deployment/chain domain selected at policy initialization.
+    pub chain_domain: [u8; 32],
+    /// The only sender permitted to act as the claim oracle for this manager.
+    pub oracle: EthereumAddress,
+    /// False pauses V2 payouts, including already-submitted attestations.
+    pub enabled: bool,
+}
+
+/// Pool-bound, expiring V2 payout arguments.
+#[derive(BorshSerialize, BorshDeserialize, PartialEq, Debug, Clone)]
+pub struct EvaluateAttestationsV2Args {
+    /// Amount, unique disbursement ID, and recipient.
+    pub transfer: EvaluateAttestationsArgs,
+    /// Canonical core reward record address.
+    pub reward_address: EthereumAddress,
+    /// Current on-chain policy epoch; old epochs are invalid.
+    pub epoch: u64,
+    /// Inclusive last Solana slot at which this claim may settle.
+    pub valid_until_slot: u64,
+}
+
 /// Instruction definition
 #[derive(BorshSerialize, BorshDeserialize, PartialEq, Debug, Clone)]
 pub enum Instructions {
@@ -144,6 +168,16 @@ pub enum Instructions {
     ///   9. `[]` Token program id
     ///  10. `[]` System program id
     EvaluateAttestations(EvaluateAttestationsArgs),
+
+    /// Configure the V2 policy (instruction 8).
+    /// Accounts: reward manager, manager signer, writable policy PDA,
+    /// writable payer signer, system program, rent sysvar.
+    SetAttestationPolicy(SetAttestationPolicyArgs),
+
+    /// Settle a V2 claim (instruction 9).
+    /// Accounts: same eleven accounts as legacy EvaluateAttestations,
+    /// followed by the read-only policy PDA. Legacy settlement is disabled.
+    EvaluateAttestationsV2(EvaluateAttestationsV2Args),
 }
 
 /// Create `InitRewardManager` instruction
@@ -366,6 +400,9 @@ pub fn submit_attestations(
     funder: &Pubkey,
     id: String,
 ) -> Result<Instruction, ProgramError> {
+    if id.is_empty() || id.len() > 30 {
+        return Err(ProgramError::InvalidArgument);
+    }
     let data =
         Instructions::SubmitAttestations(SubmitAttestationsArgs { id: id.clone() }).try_to_vec()?;
 
@@ -409,6 +446,9 @@ pub fn evaluate_attestations(
     id: String,
     eth_recipient: [u8; 20],
 ) -> Result<Instruction, ProgramError> {
+    if id.is_empty() || id.len() > 30 {
+        return Err(ProgramError::InvalidArgument);
+    }
     let data = Instructions::EvaluateAttestations(EvaluateAttestationsArgs {
         amount,
         id: id.clone(),
@@ -443,4 +483,48 @@ pub fn evaluate_attestations(
         accounts,
         data,
     })
+}
+
+/// Create a manager-authorized policy update. Every update revokes prior epochs.
+pub fn set_attestation_policy(
+    program_id: &Pubkey,
+    reward_manager: &Pubkey,
+    manager: &Pubkey,
+    payer: &Pubkey,
+    args: SetAttestationPolicyArgs,
+) -> Result<Instruction, ProgramError> {
+    let (policy, _) = crate::attestation_v2::policy_address(program_id, reward_manager);
+    Ok(Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new_readonly(*reward_manager, false),
+            AccountMeta::new_readonly(*manager, true),
+            AccountMeta::new(policy, false),
+            AccountMeta::new(*payer, true),
+            AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(sysvar::rent::id(), false),
+        ],
+        data: Instructions::SetAttestationPolicy(args).try_to_vec()?,
+    })
+}
+
+/// Create a V2 settlement using the manager's policy and the existing replay PDA.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_attestations_v2(
+    program_id: &Pubkey,
+    verified_messages: &Pubkey,
+    reward_manager: &Pubkey,
+    reward_token_source: &Pubkey,
+    reward_token_recipient_or_mint: &Pubkey,
+    oracle: &Pubkey,
+    payer: &Pubkey,
+    args: EvaluateAttestationsV2Args,
+) -> Result<Instruction, ProgramError> {
+    let mut instruction = evaluate_attestations(program_id, verified_messages, reward_manager,
+        reward_token_source, reward_token_recipient_or_mint, oracle, payer,
+        args.transfer.amount, args.transfer.id.clone(), args.transfer.eth_recipient)?;
+    let (policy, _) = crate::attestation_v2::policy_address(program_id, reward_manager);
+    instruction.accounts.push(AccountMeta::new_readonly(policy, false));
+    instruction.data = Instructions::EvaluateAttestationsV2(args).try_to_vec()?;
+    Ok(instruction)
 }
