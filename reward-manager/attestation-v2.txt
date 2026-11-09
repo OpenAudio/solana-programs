@@ -1,0 +1,77 @@
+Reward attestation V2 — draft, not a deployment candidate
+
+Scope
+This draft replaces legacy settlement with a versioned claim and an explicit
+oracle policy. Instruction 7 always rejects legacy signatures. This affects
+every pool using this program, including ordinary AUDIO rewards. Upgrading
+before all signing and settlement clients are migrated will pause payouts.
+Instructions 0–6 retain their wire discriminants; policy is 8, V2 settlement 9.
+Existing V_ attestation accounts and T_ replay markers retain their addresses.
+
+Signed format
+All fixed fields are raw bytes, not hex or base58 strings. Integers are little
+endian. Disbursement IDs are UTF-8, 1–30 bytes, matching the existing PDA seed
+limit. Amount is in raw token units, with no client-selected decimal scale.
+
+context = ASCII("AudiusRewardClaimV2") || chain_domain[32] || program_id[32]
+  || reward_manager[32] || mint[32] || core_reward_address[20]
+  || recipient_eth_address[20] || oracle_eth_address[20]
+  || amount_u64 || epoch_u64 || valid_until_slot_u64
+  || disbursement_id_length_u16 || disbursement_id
+
+message = ASCII("AudiusRewardClaimV2") || role_u8 || keccak256(context)
+Role 1 is oracle; role 2 is validator. The resulting message is 52 bytes.
+The secp256k1 signature signs keccak256(message), as in the Solana precompile.
+Both languages pin identical oracle and validator vectors in unit tests.
+
+Policy and settlement
+The policy PDA seeds are ASCII("reward_policy_v2"), reward_manager pubkey.
+Only the current RewardManager.manager signer may initialize or update it.
+The 94-byte Borsh policy contains version=2, manager pubkey, chain domain,
+oracle Ethereum address, epoch, and enabled flag. Initialization starts epoch
+1. Every update increments the epoch with checked arithmetic, invalidating
+outstanding signed claims. Chain domain cannot change after initialization.
+An absent, disabled, or mismatched policy rejects settlement. The allowed
+oracle must also be a registered SenderAccount for the same manager.
+
+Settlement derives program, manager, mint, oracle, domain, and epoch checks
+from the program/account context. It rejects expired claims using Clock.slot.
+The authenticated message binds the reward record, recipient, raw amount and
+nonce. The existing quorum, operator uniqueness, destination derivation and
+T_ replay protections remain. An epoch update does not reset paid-claim markers.
+
+Required before merge/deployment
+- Implement V2 RPC/API and SDK callers without re-enabling legacy signing.
+  Resolve the canonical reward and pool from trusted core state, bind its
+  manager and mint to the Solana accounts, and verify eligibility/amount cap.
+  Do not accept the request's context as authoritative. Recover the oracle
+  signer, require equality with the claimed oracle, and check both current
+  core pool authorization and the manager's on-chain oracle policy.
+- Choose and pin a chain-domain derivation from the Solana genesis hash and
+  core chain ID. All signers must independently check it against configuration.
+  Pin a maximum claim lifetime and confirm fresh policy/slot reads.
+- Migrate ordinary static AUDIO reward identities as well as programmable
+  rewards. Define deterministic V2 nonces that preserve existing claim/payment
+  accounting and do not permit a paid V1 claim to be claimed again under V2.
+- Migrate the existing transfer/burn BPF suites. They still encode legacy
+  success behavior and are intentionally incompatible with disabling V1.
+- Build and run the compiled program with the supported Solana BPF toolchain.
+  The new settlement_v2 tests exercise prefunded policy creation, actual
+  secp256k1 attestations, altered claims, token payout, replay and revocation.
+  They compile; successful BPF execution has not yet been established.
+  Native execution encountered the existing initialization CPI helper's
+  missing token-program AccountInfo in solana-program-test 1.8.14, before V2.
+- Add BPF tests for oracle rotation, cross-manager/source/mint substitution,
+  expiry boundaries, burn, role substitution, re-enable after revocation,
+  and historical V1 rejection. Verify compute and transaction-size budgets.
+- Obtain independent security review and rehearse the complete migration in
+  staging. Verify upgrade authority and exact deployed binary before drafting
+  the production upgrade and policy transactions. Retain containment until
+  the on-chain transition invalidates legacy claims and every client is ready.
+
+Validation completed locally
+Go: go test -race ./pkg/rewards (companion go-openaudio change).
+Rust: cargo test -p audius-reward-manager --lib --test policy_v2, using cargo
+and RUSTC pinned to 1.59.0. Six library tests and six policy tests pass.
+Native settlement simulation failure is not counted as a passing BPF test.
+No on-chain upgrade, policy update, claim, or funds transfer was submitted.

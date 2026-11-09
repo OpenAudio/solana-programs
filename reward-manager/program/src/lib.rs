@@ -3,6 +3,7 @@
 //! Audius Reward Manager program
 
 pub mod error;
+pub mod attestation_v2;
 pub mod instruction;
 pub mod processor;
 pub mod state;
